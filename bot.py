@@ -3,11 +3,18 @@
 
 import json
 import os
-
 import sys
 import telepot
 import time
+import logging
+
+from logging.config import fileConfig
+
 from telepot.loop import MessageLoop
+
+def save_captions(obj):
+    with open('captions.json', 'w') as f:
+        f.write(json.dumps(obj))
 
 def save_status(obj):
     with open('chats.json', 'w') as f:
@@ -17,19 +24,37 @@ def save_allowed(s):
     with open('allowed.json', 'w') as f:
         f.write(json.dumps(list(s)))
 
+#logging.basicConfig(
+#        handlers=[RotatingFileHandler('./bot.log', maxBytes=100000, backupCount=10)],
+#        level=logging.INFO,
+#        format="[%(asctime)s] %(levelname)s [%(name)s.%(funcName)s:%(lineno)d] %(message)s",
+#        datefmt='%Y-%m-%dT%H:%M:%S')
+fileConfig('bot_logging.ini')
+        
+
+
 if not os.path.isfile('chats.json'):
     save_status({})
+
+if not os.path.isfile('captions.json'):
+    save_captions({})
 
 if not os.path.isfile('allowed.json'):
     save_allowed(set())
 
+
+
 chats = {}
+captions = {}
 allowed = []
 TOKEN = ""
 PASSWORD = "changeme"
 
 with open('chats.json', 'r') as f:
     chats = json.load(f)
+
+with open('captions.json', 'r') as f:
+    captions = json.load(f)
 
 with open('allowed.json', 'r') as f:
     allowed = set(json.load(f))
@@ -40,7 +65,7 @@ if os.path.isfile('config.json'):
         if config['token'] == "":
             sys.exit("No token defined. Define it in a file called config.json.")
         if config['password'] == "":
-            print("WARNING: Empty Password for registering to use the bot." +
+            logging.warning("Empty Password for registering to use the bot." +
                   " It could be dangerous, because anybody could use this bot" +
                   " and forward messages to the channels associated to it")
         TOKEN = config['token']
@@ -54,7 +79,7 @@ def is_allowed(msg):
     return 'from' in msg and msg['from']['id'] in allowed
 
 def handle(msg):
-    print("Message: " + str(msg))
+    logging.debug("Message: " + str(msg))
     # Add person as allowed
     content_type, chat_type, chat_id = telepot.glance(msg)
     txt = ""
@@ -121,6 +146,10 @@ def handle(msg):
                 for (tag, name) in sorted(tags_names):
                     response = response + "\n<b>" + tag + "</b>: <i>" + name + "</i>"
                 bot.sendMessage(chat_id, response, parse_mode="HTML")
+            elif "/fwdcaption" == txt.strip()[:11]:
+                txt_split = txt.strip().split(" ")
+                captions[chat_id] = { 'caption' : " ".join(txt_split[1:]) }
+                save_captions(captions)
             elif "#" == txt[0]:
                 txt_split =txt.strip().split(" ")
                 i = 0
@@ -128,14 +157,20 @@ def handle(msg):
                 while i < len(txt_split) and txt_split[i][0] == "#":
                     tags.append(txt_split[i].lower())
                     i+=1
-                if i != len(txt_split) or 'reply_to_message' in msg:
+                if i != len(txt_split) or 'reply_to_message' in msg:        
                     approved = []
                     rejected = []
+                    caption = ""
+                    if str(chat_id) in captions:
+                        caption = captions[str(chat_id)]['caption']
                     for tag in tags:
                         if tag in chats:
                             if chats[tag]['id'] != chat_id:
                                 approved.append(chats[tag]['name'])
-                                bot.forwardMessage(chats[tag]['id'], chat_id, msg['message_id'])
+                                if caption != "":
+                                    bot.sendMessage(chats[tag]['id'], caption)
+                                if not 'reply_to_message' in msg or i != len(txt_split):
+                                    bot.forwardMessage(chats[tag]['id'], chat_id, msg['message_id'])
                                 if 'reply_to_message' in msg:
                                     bot.forwardMessage(chats[tag]['id'], chat_id, msg['reply_to_message']['message_id'])
                         else:
@@ -148,7 +183,7 @@ def handle(msg):
 bot = telepot.Bot(TOKEN)
 
 MessageLoop(bot, handle).run_as_thread()
-print('Listening ...')
+logging.info('Listening ...')
 # Keep the program running.
 while 1:
     time.sleep(10)
