@@ -11,6 +11,7 @@ import logging
 from logging.config import fileConfig
 
 from telepot.loop import MessageLoop
+from telepot.exception import TelegramError
 
 chats = {}
 chat_config = {}
@@ -34,15 +35,28 @@ def load_from_files():
         chat_config = json.load(f)
 
 
-def save_chat_config(obj):
-    with open('chat_config.json', 'w') as f:
+def save_data(name, obj):
+ 
+    if os.path.isfile(name +".bak"):
+        os.remove(name +".bak")
+    os.rename(os.path.realpath(name), os.path.realpath(name)+".bak")
+
+    with open(name, 'w') as f:
         f.write(json.dumps(obj, indent =4, sort_keys=True))
+
+def save_chat_config(obj):
+    save_data('chat_config.json', obj)
 
 def save_status(obj):
-    with open('chats.json', 'w') as f:
-        f.write(json.dumps(obj, indent =4, sort_keys=True))
+    save_data('chats.json',obj)
 
-
+def get_chat_config_data(id, key, default):
+    if not str(id) in chat_config:    
+        return default
+    if not key in chat_config[str(id)]:
+        return default
+    return chat_config[str(id)][key]
+    
 def chat_config_update(id, data, name):
     if not str(id) in chat_config:
         chat_config[str(id)] = {}
@@ -56,9 +70,7 @@ def is_allowed(msg):
         return True #all channel admins are allowed to use the bot (channels don't have sender info)
 
     if 'from' in msg:
-        id = str(msg['from']['id'])
-        if id in chat_config and 'allowed' in chat_config[id]:
-            return chat_config[str(id)]['allowed']
+        return get_chat_config_data(msg['from']['id'], 'allowed', False)
     return False
 
 def get_name(msg):
@@ -67,9 +79,18 @@ def get_name(msg):
     else:
         return msg['chat']['title']
 
+def delete_source_message(chat_id,msg):
+    keep = msg['chat']['type'] == 'private' or get_chat_config_data(chat_id, 'keepMessages', False)
+    if not keep:
+        try:
+            bot.deleteMessage(telepot.message_identifier(msg))
+        except TelegramError as ex:
+            logging.error("Unable to delete source message : " + str(ex) + " " + str(msg))
+
 def cmd_addme(chat_id, msg, txt):
     if msg['chat']['type'] != 'private':
         bot.sendMessage(chat_id, "This command is meant to be used only on personal chats.")
+        delete_source_message(chat_id,msg)
     else:
         used_password = " ".join(txt.strip().split(" ")[1:])
         if used_password == PASSWORD:
@@ -77,7 +98,7 @@ def cmd_addme(chat_id, msg, txt):
             bot.sendMessage(chat_id, msg['from']['first_name'] + ", you have been registered " +
                             "as an authorized user of this bot.")
         else:
-            log.error("Wrong password : " + str(msg))
+            logging.error("Wrong password : " + str(msg))
             bot.sendMessage(chat_id, "Wrong password.")
 
 def cmd_add_tag(chat_id, msg, txt):
@@ -88,6 +109,7 @@ def cmd_add_tag(chat_id, msg, txt):
         chats[tag] = {'id': chat_id, 'name' : name}
         bot.sendMessage(chat_id, name + " added with tag " + tag)
         save_status(chats)
+        delete_source_message(chat_id,msg)
     else:
         bot.sendMessage(chat_id, "Incorrect format. It should be _/add #{tag}_", parse_mode="Markdown")
 
@@ -108,44 +130,45 @@ def cmd_rm_tag(chat_id, msg, txt):
     else:
         bot.sendMessage(chat_id, "Incorrect format. It should be _/rm #{tag}_", parse_mode="Markdown")
 
-def do_forward(chat_id, msg, txt, msg_tags):
+
+def do_forward(chat_id, msg, txt, fwd_tags):
     txt_split =txt.strip().split(" ")
 
     i = 0
     while i < len(txt_split) and txt_split[i][0] == "#":
-        msg_tags.append(txt_split[i].lower())
+        fwd_tags.append(txt_split[i].lower())
         i+=1
                 
     if i != len(txt_split) or 'reply_to_message' in msg:        
         approved = []
         rejected = []
 
-        caption = ""
-        if str(chat_id) in chat_config and "caption" in chat_config[str(chat_id)]:
-            caption = chat_config[str(chat_id)]['caption']
+        caption = get_chat_config_data(chat_id, "caption", "")
 
-        for tag in msg_tags:
+        for tag in fwd_tags:
             if tag in chats:
                 if chats[tag]['id'] != chat_id:
                     approved.append(chats[tag]['name'])
                     if caption != "":
                         bot.sendMessage(chats[tag]['id'], caption)
+         
                     if not 'reply_to_message' in msg or i != len(txt_split):
                         bot.forwardMessage(chats[tag]['id'], chat_id, msg['message_id'])
                     if 'reply_to_message' in msg:
                         bot.forwardMessage(chats[tag]['id'], chat_id, msg['reply_to_message']['message_id'])
+                    if i == len(txt_split):
+                        delete_source_message(chat_id, msg)            
             else:
                 rejected.append(tag)
 
         if len(rejected) > 0:
             bot.sendMessage(chat_id, "Failed to send messages to tags <i>" + ", ".join(rejected) + "</i>", parse_mode="HTML")
     else:
-        # Send Failed messsage to user to don't flood the group
+        # Send Failed message to user to don't flood the group
         if 'from' in msg:
             bot.sendMessage(msg['from']['id'], "Failed to send a message only with tags which is not a reply to another message : " + txt)
         else:
             bot.sendMessage(chat_id, "Failed to send a message only with tags which is not a reply to another message" )
-
 
 
 
@@ -191,28 +214,32 @@ def handle(msg):
                 return
             
     if is_allowed(msg) and txt != "":
-        msg_tags = []
+        fwd_tags = []
         if str(chat_id) in chat_config:
             if 'autofwd' in chat_config[str(chat_id)]:
                 autofwd = chat_config[str(chat_id)]["autofwd"].split(" ")
-                msg_tags.extend(autofwd) 
+                fwd_tags.extend(autofwd) 
 
         if "/add " == txt[:5]:
             cmd_add_tag(chat_id, msg, txt)
+            delete_source_message(chat_id, msg)
                 
         elif "/rm " == txt[:4]:
             cmd_rm_tag(chat_id, msg, txt)
+            delete_source_message(chat_id, msg)
             
         elif "/fwdcaption " == txt.strip()[:12]:
             txt_split = txt.strip().split(" ")
             chat_config_update(chat_id,  { 'caption' : " ".join(txt_split[1:]) }, get_name(msg))
+            delete_source_message(chat_id, msg)
 
         elif "/autofwd " == txt.strip()[:9]:
             txt_split = txt.strip().split(" ")
             chat_config_update(chat_id, { 'autofwd' : " ".join(txt_split[1:]).lower().strip() }, get_name(msg))
+            delete_source_message(chat_id, msg)
 
-        elif "#" == txt[0] or len(msg_tags) > 0:
-            do_forward(chat_id, msg, txt, msg_tags)
+        elif "#" == txt[0] or len(fwd_tags) > 0:
+            do_forward(chat_id, msg, txt, fwd_tags)
 
 def handle_with_try(msg):
     try:
