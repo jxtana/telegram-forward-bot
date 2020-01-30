@@ -7,6 +7,7 @@ import sys
 import telepot
 import time
 import logging
+import re
 
 from logging.config import fileConfig
 
@@ -86,6 +87,12 @@ def delete_source_message(chat_id,msg):
             bot.deleteMessage(telepot.message_identifier(msg))
         except TelegramError as ex:
             logging.error("Unable to delete source message : " + str(ex) + " " + str(msg))
+            if 'from' in msg:
+                try:
+                    bot.sendMessage(msg['from']['id'], "Unable to delete source message : " + str(ex) + " " + str(msg))
+                except TelegramError as ex1:
+                    # If user does not have started a conversation with bot the sendMessage will fail
+                    pass
 
 def cmd_addme(chat_id, msg, txt):
     if msg['chat']['type'] != 'private':
@@ -132,14 +139,21 @@ def cmd_rm_tag(chat_id, msg, txt):
 
 
 def do_forward(chat_id, msg, txt, fwd_tags):
-    txt_split =txt.strip().split(" ")
+
+    txt_split = re.split("[ \n\r\t]", txt)
 
     i = 0
-    while i < len(txt_split) and txt_split[i][0] == "#":
-        fwd_tags.append(txt_split[i].lower())
+    while i < len(txt_split) and (len(txt_split[i]) == 0 or txt_split[i][0] == "#"):
+        if (len(txt_split[i]) > 0):
+            tag = txt_split[i]
+            fwd_tags.append(tag.lower())
+            if txt.startswith(tag):
+                txt = txt[len(tag):].strip(" \n\r\t")
+        else:
+            txt = txt.strip(" \n\r\t")
         i+=1
                 
-    if i != len(txt_split) or 'reply_to_message' in msg:        
+    if len(txt) > 0 or 'reply_to_message' in msg:        
         approved = []
         rejected = []
 
@@ -152,11 +166,11 @@ def do_forward(chat_id, msg, txt, fwd_tags):
                     if caption != "":
                         bot.sendMessage(chats[tag]['id'], caption)
          
-                    if not 'reply_to_message' in msg or i != len(txt_split):
+                    if not 'reply_to_message' in msg or len(txt) > 0:
                         bot.forwardMessage(chats[tag]['id'], chat_id, msg['message_id'])
                     if 'reply_to_message' in msg:
                         bot.forwardMessage(chats[tag]['id'], chat_id, msg['reply_to_message']['message_id'])
-                    if i == len(txt_split):
+                    if len(txt) == 0:
                         delete_source_message(chat_id, msg)            
             else:
                 rejected.append(tag)
@@ -179,28 +193,28 @@ def handle(msg):
     content_type, chat_type, chat_id = telepot.glance(msg)
     txt = ""
     if 'text' in msg:
-        txt = txt + msg['text']
+        txt = txt + msg['text'].strip(" \n\r\t")
     elif 'caption' in msg:
-        txt = txt + msg['caption']
+        txt = txt + msg['caption'].strip(" \n\r\t")
         
     # Commands that are valid only on groups and personal chats.
     if msg['chat']['type'] != 'channel':
-        if "/addme" == txt.strip()[:6]:
+        if "/addme" == txt[:6]:
             cmd_addme(chat_id, msg, txt)
             return
         elif is_allowed(msg):
-            if "/rmme" == txt.strip()[:5]:
+            if "/rmme" == txt[:5]:
                 chat_config_update(msg['from']['id'], { 'allowed' : False } , get_name(msg) )
                 bot.sendMessage(chat_id, "Your permission for using the bot was removed successfully.")
                 return
-            elif "/chatlist" ==  txt.strip():
+            elif "/chatlist" ==  txt:
                 response = "<b>Chat List</b>"
                 for id in chat_config.keys():
                     config = chat_config[id]
                     response = response + "\n<b>" + str(id) + "</b>: <i>" + str(config) + "</i>"
                 bot.sendMessage(chat_id, response, parse_mode="HTML")
                 return
-            elif "/taglist" ==  txt.strip():
+            elif "/taglist" ==  txt:
                 tags_names = []
                 for tag, chat in chats.items():
                     tags_names.append( (tag, chat['name']))
@@ -209,7 +223,7 @@ def handle(msg):
                     response = response + "\n<b>" + tag + "</b>: <i>" + name + "</i>"
                 bot.sendMessage(chat_id, response, parse_mode="HTML")
                 return
-            elif "/reload" == txt.strip():
+            elif "/reload" == txt:
                 load_from_files()
                 return
             
@@ -228,14 +242,18 @@ def handle(msg):
             cmd_rm_tag(chat_id, msg, txt)
             delete_source_message(chat_id, msg)
             
-        elif "/fwdcaption " == txt.strip()[:12]:
-            txt_split = txt.strip().split(" ")
-            chat_config_update(chat_id,  { 'caption' : " ".join(txt_split[1:]) }, get_name(msg))
+        elif "/fwdcaption" == txt[:11]:
+            caption = txt[11:].strip(" \n\r\t")
+            chat_config_update(chat_id,  { 'caption' : caption }, get_name(msg))
             delete_source_message(chat_id, msg)
 
-        elif "/autofwd " == txt.strip()[:9]:
-            txt_split = txt.strip().split(" ")
-            chat_config_update(chat_id, { 'autofwd' : " ".join(txt_split[1:]).lower().strip() }, get_name(msg))
+        elif "/autofwd" == txt:
+            chat_config_update(chat_id, { 'autofwd' : "" }, get_name(msg))
+            delete_source_message(chat_id, msg)
+
+        elif "/autofwd" == txt[:9]:
+            txt_split = txt[9:].strip(" \n\r\t").lower().split(" ")
+            chat_config_update(chat_id, { 'autofwd' : " ".join(txt_split).strip() }, get_name(msg))
             delete_source_message(chat_id, msg)
 
         elif "#" == txt[0] or len(fwd_tags) > 0:
